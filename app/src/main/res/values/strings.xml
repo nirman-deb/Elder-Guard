@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Elder Guard</string>
+    <string name="accessibility_desc">Elder Guard needs this to block unauthorized APK installations.</string>
+</resources>
