@@ -3,6 +3,7 @@
 ElderGuard is an **Invisible, AI-Powered Guardian** designed specifically for elderly and non-tech-savvy smartphone users. It proactively blocks social engineering scams, phishing links, and malicious sideloaded APKs using an on-device Retrieval-Augmented Generation (RAG) pipeline and low-level OS scanning, all without requiring any active user intervention.
 
 ---
+### 📥 [Download ElderGuard APK](yahan_apna_apk_ka_link_paste_kar)
 
 ## ⚠️ IMPORTANT NOTE FOR JUDGES: API KEY SETUP
 To test this application locally, you **MUST** provide your own Gemini API key. For security reasons, the API key has been removed from the repository.
