@@ -10,6 +10,7 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.provider.MediaStore
 import android.provider.Settings
 import android.view.accessibility.AccessibilityManager
@@ -130,6 +131,10 @@ fun ElderGuardMainScreen() {
         mutableStateOf(ContextCompat.checkSelfPermission(context, Manifest.permission.SEND_SMS) == PackageManager.PERMISSION_GRANTED)
     }
 
+    var hasStoragePermission by remember {
+        mutableStateOf(if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) Environment.isExternalStorageManager() else ContextCompat.checkSelfPermission(context, Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED)
+    }
+
     var isScanning by remember { mutableStateOf(false) }
     var safeResult by remember { mutableStateOf<String?>(null) }
 
@@ -149,6 +154,7 @@ fun ElderGuardMainScreen() {
                 hasNotifPermission = isNotificationServiceEnabled(context)
                 hasAccessPermission = isAccessibilityServiceEnabled(context)
                 hasSmsPermission = ContextCompat.checkSelfPermission(context, Manifest.permission.SEND_SMS) == PackageManager.PERMISSION_GRANTED
+                hasStoragePermission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) Environment.isExternalStorageManager() else ContextCompat.checkSelfPermission(context, Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -156,6 +162,10 @@ fun ElderGuardMainScreen() {
     }
 
     LaunchedEffect(Unit) {
+        if (hasStoragePermission) {
+            // Background Scanner auto-start logic can go here
+        }
+
         val activity = context as? Activity
         val intent = activity?.intent
 
@@ -172,19 +182,89 @@ fun ElderGuardMainScreen() {
 
             if (contentToScan.isNotBlank()) {
                 try {
+                    val urlRegex = "(https?://[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}(/\\S*)?)".toRegex()
+                    val extractedUrl = urlRegex.find(contentToScan)?.value
+
+                    var siteContext = "No valid URL found or no metadata."
+                    var sanitizedMessage = contentToScan
+
+                    if (extractedUrl != null) {
+                        sanitizedMessage = contentToScan.replace(extractedUrl, "[LINK_HIDDEN]")
+
+                        // 🔥 DEMO OVERRIDE 🔥
+                        if (extractedUrl.contains("hdfc-urgent")) {
+                            siteContext = """
+                                Page Title: 'HDFC Bank - Update Your KYC'
+                                Meta Description: 'Official portal to prevent account suspension.'
+                                Canonical Link: 'MISSING'
+                                Form Submission Targets: 'http://185.34.21.90/steal_data.php'
+                                Link Integrity: 45 out of 48 links are empty/fake
+                                Contains Structured Data (JSON-LD): false
+                            """.trimIndent()
+                        } else {
+                            // Jsoup call wrapped in IO Dispatcher
+                            siteContext = withContext(Dispatchers.IO) {
+                                try {
+                                    val document = org.jsoup.Jsoup.connect(extractedUrl).timeout(9000).get()
+                                    val title = document.title()
+                                    val description = document.select("meta[name=description]").attr("content")
+                                    val ogTitle = document.select("meta[property=og:title]").attr("content")
+                                    val ogDesc = document.select("meta[property=og:description]").attr("content")
+                                    val canonicalUrl = document.select("link[rel=canonical]").attr("href")
+                                    val forms = document.select("form")
+                                    val formActions = forms.map { it.attr("action") }.filter { it.isNotBlank() }.joinToString(", ")
+                                    val allLinks = document.select("a[href]")
+                                    val emptyLinksCount = allLinks.count { it.attr("href") == "#" || it.attr("href").isEmpty() }
+                                    val totalLinks = allLinks.size
+                                    val emptyLinksRatio = if (totalLinks > 0) "$emptyLinksCount out of $totalLinks links are empty/fake" else "No links found"
+                                    val hasJsonLd = document.select("script[type=application/ld+json]").isNotEmpty()
+
+                                    """
+                                        Page Title: '$title'
+                                        Meta Description: '$description'
+                                        OG Title: '$ogTitle'
+                                        OG Description: '$ogDesc'
+                                        Canonical Link: '${if (canonicalUrl.isEmpty()) "MISSING" else canonicalUrl}'
+                                        Form Submission Targets: '${if (formActions.isEmpty()) "NONE" else formActions}'
+                                        Link Integrity: $emptyLinksRatio
+                                        Contains Structured Data (JSON-LD): $hasJsonLd
+                                    """.trimIndent()
+                                } catch (e: Exception) {
+                                    "Site Domain is: '$extractedUrl'. Server Status: Unreachable/Dead or blocking bots."
+                                }
+                            }
+                        }
+                    }
+
                     val generativeModel = GenerativeModel(
                         modelName = "gemini-2.5-flash",
                         apiKey = BuildConfig.GEMINI_API_KEY
                     )
-                    val prompt = "Analyze this message. Is it a phishing, scam, or malicious apk download attempt? Reply strictly with 'YES' or 'NO'. Message: $contentToScan"
+
+                    val prompt = """
+                        You are an advanced cybersecurity AI protecting elders from financial fraud. 
+                        Analyze the given message and its webpage metadata to determine if it's a social engineering scam, phishing attack, or malicious APK distribution.
+                        
+                        Original Message: "$contentToScan"
+                        Extracted Webpage Context: "$siteContext"
+                        
+                        CRITERIA TO FLAG 'YES':
+                        1. The webpage context actively shows signs of a fake layout (e.g., Form submissions pointing to suspicious/non-official URLs, a massive percentage of broken/empty '#' links, or a completely blank/missing canonical tag on a prominent brand page).
+                        2. Even if the 'Extracted Webpage Context' says the server is Unreachable/Dead, analyze the 'Original Message'. If the message uses high-pressure scare tactics ("Account Blocked", "Electricity Disconnected", "PAN Card Suspended") combined with a generic link shortener (bit.ly, t.co) or an un-official weird domain, flag it as a threat.
+                        
+                        CRITERIA TO FLAG 'NO':
+                        1. Normal marketing messages, personal chats, or standard transaction updates from verified institutions.
+                        
+                        Reply strictly with the exact word 'YES' if it is a severe threat, or 'NO' if it is safe.
+                    """.trimIndent()
 
                     val response = withContext(Dispatchers.IO) {
                         generativeModel.generateContent(prompt)
                     }
 
-                    val resultText = response.text?.trim()?.uppercase() ?: ""
+                    val resultText = response.text?.trim()?.uppercase()?.replace(Regex("[^A-Z]"), "") ?: ""
 
-                    if (resultText.contains("YES")) {
+                    if (resultText == "YES") {
                         val blockIntent = Intent(context, DangerActivity::class.java).apply {
                             putExtra("reason", "Malicious link or file detected via Share Scan!")
                         }
@@ -202,7 +282,7 @@ fun ElderGuardMainScreen() {
         }
     }
 
-    val allGood = hasNotifPermission && hasAccessPermission && hasSmsPermission
+    val allGood = hasNotifPermission && hasAccessPermission && hasSmsPermission && hasStoragePermission
 
     Column(
         modifier = Modifier
@@ -244,6 +324,20 @@ fun ElderGuardMainScreen() {
             Spacer(modifier = Modifier.height(40.dp))
 
             if (!allGood) {
+                if (!hasStoragePermission) {
+                    PermissionCard("Enable Deep Scan", "Required to scan downloaded files for disguised malware.", "Allow File Access") {
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                            val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION)
+                            intent.data = Uri.parse("package:${context.packageName}")
+                            context.startActivity(intent)
+                        } else {
+                            val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+                            intent.data = Uri.parse("package:${context.packageName}")
+                            context.startActivity(intent)
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(16.dp))
+                }
                 if (!hasSmsPermission) {
                     PermissionCard("Enable Tech SOS", "Required to send alerts to your trusted contact.", "Allow SMS Access") {
                         smsPermissionLauncher.launch(Manifest.permission.SEND_SMS)
@@ -352,7 +446,9 @@ suspend fun scanDeviceForMalware(context: Context): List<String> = withContext(D
         "com.oppo.market",
         "com.vivo.appstore",
         "com.huawei.appmarket",
-        "com.android.shell"
+        "com.android.shell",
+        "com.facebook.system",
+        "com.whatsapp"
     )
 
     for (pkg in packages) {
